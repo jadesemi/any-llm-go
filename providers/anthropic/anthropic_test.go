@@ -63,7 +63,7 @@ func TestCapabilities(t *testing.T) {
 	require.True(t, caps.CompletionStreaming)
 	require.True(t, caps.CompletionTools)
 	require.False(t, caps.Embedding) // Anthropic doesn't support embeddings.
-	require.False(t, caps.ListModels)
+	require.True(t, caps.ListModels)
 }
 
 func TestConvertMessages(t *testing.T) {
@@ -1190,6 +1190,34 @@ func TestIntegrationAgentLoopContinuation(t *testing.T) {
 				strings.Contains(content, "salvaterra"),
 		)
 	}
+}
+
+func TestIntegrationListModels(t *testing.T) {
+	t.Parallel()
+
+	if testutil.SkipIfNoAPIKey("anthropic") {
+		t.Skip("ANTHROPIC_API_KEY not set")
+	}
+
+	provider, err := New()
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	resp, err := provider.ListModels(ctx)
+	require.NoError(t, err)
+
+	require.Equal(t, objectList, resp.Object)
+	require.NotEmpty(t, resp.Data)
+
+	// Check that some expected models are present.
+	found := false
+	for _, m := range resp.Data {
+		if strings.Contains(m.ID, "claude") {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "Expected to find Claude models in the list")
 }
 
 func TestIntegrationAuthenticationError(t *testing.T) {

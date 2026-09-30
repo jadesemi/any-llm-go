@@ -24,6 +24,12 @@ const (
 	providerName     = "anthropic"
 )
 
+// OpenAI-compatible object type markers.
+const (
+	objectList  = "list"
+	objectModel = "model"
+)
+
 // Anthropic content block types.
 const (
 	blockTypeText     = "text"
@@ -78,6 +84,7 @@ const (
 var (
 	_ providers.CapabilityProvider = (*Provider)(nil)
 	_ providers.ErrorConverter     = (*Provider)(nil)
+	_ providers.ModelLister        = (*Provider)(nil)
 	_ providers.Provider           = (*Provider)(nil)
 )
 
@@ -143,7 +150,7 @@ func (p *Provider) Capabilities() providers.Capabilities {
 		CompletionStreaming: true,
 		CompletionTools:     true,
 		Embedding:           false,
-		ListModels:          false,
+		ListModels:          true,
 	}
 }
 
@@ -268,6 +275,30 @@ func (p *Provider) CompletionStream(
 	}()
 
 	return chunks, errs
+}
+
+// ListModels returns the models available through the Anthropic API.
+func (p *Provider) ListModels(ctx context.Context) (*providers.ModelsResponse, error) {
+	var models []providers.Model
+
+	iter := p.client.Models.ListAutoPaging(ctx, anthropic.ModelListParams{})
+	for iter.Next() {
+		info := iter.Current()
+		models = append(models, providers.Model{
+			ID:      info.ID,
+			Object:  objectModel,
+			Created: info.CreatedAt.Unix(),
+			OwnedBy: providerName,
+		})
+	}
+	if err := iter.Err(); err != nil {
+		return nil, p.ConvertError(err)
+	}
+
+	return &providers.ModelsResponse{
+		Object: objectList,
+		Data:   models,
+	}, nil
 }
 
 // Name returns the provider name.
