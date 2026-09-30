@@ -68,6 +68,16 @@ if response.Choices[0].Message.Reasoning != nil {
 }
 ```
 
+**List Models:**
+
+```go
+provider, _ := anthropic.New()
+models, err := provider.ListModels(ctx)
+for _, model := range models.Data {
+    fmt.Println(model.ID)
+}
+```
+
 ### DeepSeek
 
 ```go
