@@ -257,7 +257,9 @@ func (p *Provider) CompletionStream(
 				chunks <- state.handleMessageStart(event.AsMessageStart())
 
 			case eventContentBlockStart:
-				state.handleContentBlockStart(event.AsContentBlockStart())
+				if chunk := state.handleContentBlockStart(event.AsContentBlockStart()); chunk != nil {
+					chunks <- *chunk
+				}
 
 			case eventContentBlockDelta:
 				if chunk := state.handleContentBlockDelta(event.AsContentBlockDelta()); chunk != nil {
@@ -340,34 +342,46 @@ func (s *streamState) handleContentBlockDelta(event anthropic.ContentBlockDeltaE
 	}
 }
 
-// handleContentBlockStart processes a content_block_start event.
-func (s *streamState) handleContentBlockStart(event anthropic.ContentBlockStartEvent) {
-	switch event.ContentBlock.Type {
-	case blockTypeThinking:
-		// Reasoning block started - no action needed.
-	case blockTypeToolUse:
-		s.currentToolIdx++
-		// TODO: Extract to newToolCallFromBlock() if this pattern is needed elsewhere.
-		tc := providers.ToolCall{
+// handleContentBlockStart processes a content_block_start event and returns a chunk if applicable.
+// A tool_use block surfaces the tool call's id and name once, here at its start, in a chunk whose
+// Arguments is empty; a zero-argument tool call therefore still announces its identity even though
+// no input_json_delta follows it. Any other block type (text, thinking) returns nil. The appended
+// toolCalls entry and bumped currentToolIdx track that a tool_use block is open, guarding the
+// following input_json_delta fragments.
+func (s *streamState) handleContentBlockStart(event anthropic.ContentBlockStartEvent) *providers.ChatCompletionChunk {
+	if event.ContentBlock.Type != blockTypeToolUse {
+		return nil
+	}
+
+	s.currentToolIdx++
+	s.toolCalls = append(s.toolCalls, providers.ToolCall{})
+
+	chunk := s.chunk(providers.ChunkDelta{
+		ToolCalls: []providers.ToolCall{{
 			ID:   event.ContentBlock.ID,
 			Type: "function",
 			Function: providers.FunctionCall{
 				Name: event.ContentBlock.Name,
 			},
-		}
-		s.toolCalls = append(s.toolCalls, tc)
-	}
+		}},
+	})
+	return &chunk
 }
 
-// handleInputJSONDelta processes a tool input JSON delta and returns a chunk if applicable.
+// handleInputJSONDelta processes a tool input JSON delta and returns a chunk carrying that delta's
+// raw fragment: the chunk's tool call has empty id, name, and type, and Arguments equal to the
+// fragment, so a consumer concatenating successive fragments reconstructs the arguments exactly.
+// The tool call's id and name are surfaced once at the block start, never repeated here. Returns
+// nil when no tool_use block is open.
 func (s *streamState) handleInputJSONDelta(partialJSON string) *providers.ChatCompletionChunk {
 	if s.currentToolIdx < 0 || s.currentToolIdx >= len(s.toolCalls) {
 		return nil
 	}
 
-	s.toolCalls[s.currentToolIdx].Function.Arguments += partialJSON
 	chunk := s.chunk(providers.ChunkDelta{
-		ToolCalls: []providers.ToolCall{s.toolCalls[s.currentToolIdx]},
+		ToolCalls: []providers.ToolCall{{
+			Function: providers.FunctionCall{Arguments: partialJSON},
+		}},
 	})
 	return &chunk
 }

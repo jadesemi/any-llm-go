@@ -315,7 +315,7 @@ func TestStreamStateHandleInputJSONDelta(t *testing.T) {
 		require.Nil(t, chunk)
 	})
 
-	t.Run("appends to current tool call arguments", func(t *testing.T) {
+	t.Run("emits each fragment as the delta without duplication", func(t *testing.T) {
 		t.Parallel()
 
 		state := newStreamState()
@@ -323,16 +323,96 @@ func TestStreamStateHandleInputJSONDelta(t *testing.T) {
 		state.model = "claude-3"
 		state.currentToolIdx = 0
 		state.toolCalls = []providers.ToolCall{
-			{ID: "call_1", Type: "function", Function: providers.FunctionCall{Name: "get_weather", Arguments: ""}},
+			{ID: "call_1", Type: "function", Function: providers.FunctionCall{Name: "get_weather"}},
 		}
 
-		chunk := state.handleInputJSONDelta(`{"location":`)
-		require.NotNil(t, chunk)
-		require.Equal(t, `{"location":`, state.toolCalls[0].Function.Arguments)
+		var args strings.Builder
+		for _, fragment := range []string{`{"location":`, `"Paris"}`} {
+			chunk := state.handleInputJSONDelta(fragment)
+			require.NotNil(t, chunk)
+			require.Len(t, chunk.Choices, 1)
 
-		chunk2 := state.handleInputJSONDelta(`"Paris"}`)
-		require.NotNil(t, chunk2)
-		require.Equal(t, `{"location":"Paris"}`, state.toolCalls[0].Function.Arguments)
+			tcs := chunk.Choices[0].Delta.ToolCalls
+			require.Len(t, tcs, 1)
+			// Identity rides the block start, never a delta: id, name and type are empty here.
+			require.Empty(t, tcs[0].ID)
+			require.Empty(t, tcs[0].Function.Name)
+			require.Empty(t, tcs[0].Type)
+			// The delta carries exactly this fragment, not the accumulated arguments.
+			require.Equal(t, fragment, tcs[0].Function.Arguments)
+
+			args.WriteString(tcs[0].Function.Arguments)
+		}
+
+		// Concatenating the fragments reconstructs the full arguments exactly, with no duplication.
+		require.Equal(t, `{"location":"Paris"}`, args.String())
+	})
+}
+
+func TestStreamStateHandleContentBlockStart(t *testing.T) {
+	t.Parallel()
+
+	t.Run("tool_use block emits id and name with empty arguments", func(t *testing.T) {
+		t.Parallel()
+
+		state := newStreamState()
+		state.messageID = "msg_123"
+		state.model = "claude-3"
+
+		event := anthropic.ContentBlockStartEvent{
+			ContentBlock: anthropic.ContentBlockStartEventContentBlockUnion{
+				Type: blockTypeToolUse,
+				ID:   "call_1",
+				Name: "get_weather",
+			},
+		}
+
+		chunk := state.handleContentBlockStart(event)
+		require.NotNil(t, chunk)
+		require.Equal(t, "msg_123", chunk.ID)
+		require.Len(t, chunk.Choices, 1)
+
+		tcs := chunk.Choices[0].Delta.ToolCalls
+		require.Len(t, tcs, 1)
+		// Identity surfaces once, here at the start: id and name set, arguments still empty.
+		require.Equal(t, "call_1", tcs[0].ID)
+		require.Equal(t, "get_weather", tcs[0].Function.Name)
+		require.Empty(t, tcs[0].Function.Arguments)
+
+		// The open tool_use block is tracked so the following fragments are emitted.
+		require.Equal(t, 0, state.currentToolIdx)
+		require.Len(t, state.toolCalls, 1)
+	})
+
+	t.Run("non-tool_use block emits nothing", func(t *testing.T) {
+		t.Parallel()
+
+		cases := []struct {
+			name      string
+			blockType string
+		}{
+			{"text block", blockTypeText},
+			{"thinking block", blockTypeThinking},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				state := newStreamState()
+				event := anthropic.ContentBlockStartEvent{
+					ContentBlock: anthropic.ContentBlockStartEventContentBlockUnion{
+						Type: tc.blockType,
+					},
+				}
+
+				chunk := state.handleContentBlockStart(event)
+				require.Nil(t, chunk)
+				// No tool_use block opened, so no fragment guard is armed.
+				require.Equal(t, -1, state.currentToolIdx)
+				require.Empty(t, state.toolCalls)
+			})
+		}
 	})
 }
 
