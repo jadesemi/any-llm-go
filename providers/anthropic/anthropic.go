@@ -88,7 +88,8 @@ var (
 	_ providers.Provider           = (*Provider)(nil)
 )
 
-// Provider implements the providers.Provider interface for Anthropic.
+// Provider implements the providers.Provider interface for Anthropic. A Provider is
+// built with New; the zero value holds no client and is not usable.
 type Provider struct {
 	client *anthropic.Client
 	config *config.Config
@@ -106,7 +107,11 @@ type streamState struct {
 	inputUsage     int64
 }
 
-// New creates a new Anthropic provider.
+// New returns an Anthropic provider configured by opts. The API key is the one opts
+// give, else the ANTHROPIC_API_KEY environment variable; the base URL is the one opts
+// give, else ANTHROPIC_BASE_URL, else the SDK's default. It returns an error when an
+// option is invalid, when the resolved API key is empty (a missing-API-key error), or
+// when the base URL cannot be resolved.
 func New(opts ...config.Option) (*Provider, error) {
 	cfg, err := config.New(opts...)
 	if err != nil {
@@ -140,7 +145,9 @@ func New(opts ...config.Option) (*Provider, error) {
 	}, nil
 }
 
-// Capabilities returns the provider's capabilities.
+// Capabilities returns the capability set the provider reports: completion, image
+// and PDF input, reasoning, streaming, tools, and model listing are supported;
+// embeddings are not.
 func (p *Provider) Capabilities() providers.Capabilities {
 	return providers.Capabilities{
 		Completion:          true,
@@ -154,7 +161,9 @@ func (p *Provider) Capabilities() providers.Capabilities {
 	}
 }
 
-// Completion performs a chat completion request.
+// Completion returns the model's completion of params in one response. It returns an
+// error when params cannot be converted to a request (a tool that cannot be
+// converted), or the API call's failure converted through ConvertError.
 func (p *Provider) Completion(
 	ctx context.Context,
 	params providers.CompletionParams,
@@ -228,7 +237,12 @@ func (p *Provider) convertParams(params providers.CompletionParams) (anthropic.M
 	return req, nil
 }
 
-// CompletionStream performs a streaming chat completion request.
+// CompletionStream streams the model's completion of params as chunks on the first
+// channel, in arrival order. Both channels close when the stream ends. A failure —
+// params that cannot be converted to a request, or a stream failure converted
+// through ConvertError, a cancelled ctx included — is sent once on the error
+// channel, which the caller reads after the chunk channel closes; a stream that ends
+// cleanly sends no error.
 func (p *Provider) CompletionStream(
 	ctx context.Context,
 	params providers.CompletionParams,
@@ -279,7 +293,8 @@ func (p *Provider) CompletionStream(
 	return chunks, errs
 }
 
-// ListModels returns the models available through the Anthropic API.
+// ListModels returns every model the Anthropic API lists for the account, each owned
+// by "anthropic". It returns the listing's failure converted through ConvertError.
 func (p *Provider) ListModels(ctx context.Context) (*providers.ModelsResponse, error) {
 	var models []providers.Model
 
@@ -303,7 +318,7 @@ func (p *Provider) ListModels(ctx context.Context) (*providers.ModelsResponse, e
 	}, nil
 }
 
-// Name returns the provider name.
+// Name returns "anthropic".
 func (p *Provider) Name() string {
 	return providerName
 }
@@ -424,9 +439,21 @@ func (s *streamState) handleTextDelta(text string) *providers.ChatCompletionChun
 	return &chunk
 }
 
-// applyThinking configures thinking/reasoning on the request if applicable.
+// applyThinking sets req's thinking configuration from effort, given the request's
+// maxTokens:
+//   - ReasoningEffortNone disables thinking explicitly — req carries thinking
+//     {type: "disabled"} — and leaves req.MaxTokens unchanged;
+//   - any other effort — empty, ReasoningEffortAuto, or a value equal to none of the
+//     ReasoningEffort constants (matching is exact) — leaves req untouched, sending
+//     no thinking field so the model's own default applies;
+//   - low, medium, or high enables thinking with that level's token budget (1024,
+//     4096, 16384); it raises req.MaxTokens to twice the budget when maxTokens is
+//     less than twice the budget, and leaves req.MaxTokens unchanged when maxTokens
+//     is at least twice the budget.
 func applyThinking(req *anthropic.MessageNewParams, effort providers.ReasoningEffort, maxTokens int64) {
-	if effort == "" || effort == providers.ReasoningEffortNone {
+	if effort == providers.ReasoningEffortNone {
+		disabled := anthropic.NewThinkingConfigDisabledParam()
+		req.Thinking = anthropic.ThinkingConfigParamUnion{OfDisabled: &disabled}
 		return
 	}
 
@@ -780,8 +807,13 @@ func toStringSlice(v any) ([]string, error) {
 	}
 }
 
-// ConvertError converts an Anthropic SDK error to a unified error type.
-// Implements providers.ErrorConverter.
+// ConvertError returns err as an any-llm-go error, wrapping err. It returns nil for a
+// nil err, and a provider error for an err that is not an Anthropic API error. An API
+// error maps by HTTP status: 401 to an authentication error; 429 to a rate-limit
+// error; 404 to a model-not-found error; 400 to a context-length error when the
+// response names a context-length or token limit, else an invalid-request error; 403
+// to a content-filter error when the response names content or safety, else an
+// authentication error; any other status to a provider error.
 func (p *Provider) ConvertError(err error) error {
 	if err == nil {
 		return nil

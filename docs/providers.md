@@ -68,6 +68,8 @@ if response.Choices[0].Message.Reasoning != nil {
 }
 ```
 
+Models that think by default keep thinking unless told otherwise. `ReasoningEffortNone` turns thinking off explicitly — the request carries `thinking: {type: "disabled"}` — while an empty `ReasoningEffort` sends no `thinking` field, leaving the model's default in place.
+
 **List Models:**
 
 ```go

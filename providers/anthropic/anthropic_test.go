@@ -419,73 +419,72 @@ func TestStreamStateHandleContentBlockStart(t *testing.T) {
 func TestApplyThinking(t *testing.T) {
 	t.Parallel()
 
+	const (
+		variantNone     = "none"
+		variantDisabled = "disabled"
+		variantEnabled  = "enabled"
+	)
+
 	tests := []struct {
 		name              string
 		effort            providers.ReasoningEffort
-		initialMaxTokens  int64
+		maxTokens         int64
 		expectedMaxTokens int64
-		expectThinking    bool
+		expectedVariant   string
+		expectedBudget    int64
 	}{
-		{
-			name:              "empty effort does nothing",
-			effort:            "",
-			initialMaxTokens:  1000,
-			expectedMaxTokens: 1000,
-			expectThinking:    false,
-		},
-		{
-			name:              "ReasoningEffortNone does nothing",
-			effort:            providers.ReasoningEffortNone,
-			initialMaxTokens:  1000,
-			expectedMaxTokens: 1000,
-			expectThinking:    false,
-		},
-		{
-			name:              "invalid effort does nothing",
-			effort:            "invalid",
-			initialMaxTokens:  1000,
-			expectedMaxTokens: 1000,
-			expectThinking:    false,
-		},
-		{
-			name:              "low effort increases tokens when insufficient",
-			effort:            providers.ReasoningEffortLow,
-			initialMaxTokens:  1000,
-			expectedMaxTokens: 2048, // budget=1024, min=2048
-			expectThinking:    true,
-		},
-		{
-			name:              "low effort preserves tokens when sufficient",
-			effort:            providers.ReasoningEffortLow,
-			initialMaxTokens:  10000,
-			expectedMaxTokens: 10000,
-			expectThinking:    true,
-		},
-		{
-			name:              "medium effort increases tokens when insufficient",
-			effort:            providers.ReasoningEffortMedium,
-			initialMaxTokens:  1000,
-			expectedMaxTokens: 8192, // budget=4096, min=8192
-			expectThinking:    true,
-		},
-		{
-			name:              "high effort increases tokens when insufficient",
-			effort:            providers.ReasoningEffortHigh,
-			initialMaxTokens:  1000,
-			expectedMaxTokens: 32768, // budget=16384, min=32768
-			expectThinking:    true,
-		},
+		// none: explicit disable, MaxTokens unchanged.
+		{name: "none small maxTokens disables and keeps tokens", effort: providers.ReasoningEffortNone, maxTokens: 1000, expectedMaxTokens: 1000, expectedVariant: variantDisabled},
+		{name: "none large maxTokens disables and keeps tokens", effort: providers.ReasoningEffortNone, maxTokens: 100000, expectedMaxTokens: 100000, expectedVariant: variantDisabled},
+
+		// empty or unrecognised: req untouched.
+		{name: "empty effort leaves req untouched", effort: "", maxTokens: 1000, expectedMaxTokens: 1000, expectedVariant: variantNone},
+		{name: "invalid effort leaves req untouched", effort: "invalid", maxTokens: 1000, expectedMaxTokens: 1000, expectedVariant: variantNone},
+		{name: "auto effort leaves req untouched", effort: providers.ReasoningEffortAuto, maxTokens: 1000, expectedMaxTokens: 1000, expectedVariant: variantNone},
+
+		// low: budget 1024, twice = 2048.
+		{name: "low well below twice budget raises to 2048", effort: providers.ReasoningEffortLow, maxTokens: 1000, expectedMaxTokens: 2048, expectedVariant: variantEnabled, expectedBudget: 1024},
+		{name: "low one below twice budget raises to 2048", effort: providers.ReasoningEffortLow, maxTokens: 2047, expectedMaxTokens: 2048, expectedVariant: variantEnabled, expectedBudget: 1024},
+		{name: "low exactly twice budget unchanged", effort: providers.ReasoningEffortLow, maxTokens: 2048, expectedMaxTokens: 2048, expectedVariant: variantEnabled, expectedBudget: 1024},
+		{name: "low one above twice budget unchanged", effort: providers.ReasoningEffortLow, maxTokens: 2049, expectedMaxTokens: 2049, expectedVariant: variantEnabled, expectedBudget: 1024},
+		{name: "low large maxTokens unchanged", effort: providers.ReasoningEffortLow, maxTokens: 10000, expectedMaxTokens: 10000, expectedVariant: variantEnabled, expectedBudget: 1024},
+
+		// medium: budget 4096, twice = 8192.
+		{name: "medium well below twice budget raises to 8192", effort: providers.ReasoningEffortMedium, maxTokens: 1000, expectedMaxTokens: 8192, expectedVariant: variantEnabled, expectedBudget: 4096},
+		{name: "medium one below twice budget raises to 8192", effort: providers.ReasoningEffortMedium, maxTokens: 8191, expectedMaxTokens: 8192, expectedVariant: variantEnabled, expectedBudget: 4096},
+		{name: "medium exactly twice budget unchanged", effort: providers.ReasoningEffortMedium, maxTokens: 8192, expectedMaxTokens: 8192, expectedVariant: variantEnabled, expectedBudget: 4096},
+		{name: "medium one above twice budget unchanged", effort: providers.ReasoningEffortMedium, maxTokens: 8193, expectedMaxTokens: 8193, expectedVariant: variantEnabled, expectedBudget: 4096},
+
+		// high: budget 16384, twice = 32768.
+		{name: "high well below twice budget raises to 32768", effort: providers.ReasoningEffortHigh, maxTokens: 1000, expectedMaxTokens: 32768, expectedVariant: variantEnabled, expectedBudget: 16384},
+		{name: "high one below twice budget raises to 32768", effort: providers.ReasoningEffortHigh, maxTokens: 32767, expectedMaxTokens: 32768, expectedVariant: variantEnabled, expectedBudget: 16384},
+		{name: "high exactly twice budget unchanged", effort: providers.ReasoningEffortHigh, maxTokens: 32768, expectedMaxTokens: 32768, expectedVariant: variantEnabled, expectedBudget: 16384},
+		{name: "high one above twice budget unchanged", effort: providers.ReasoningEffortHigh, maxTokens: 32769, expectedMaxTokens: 32769, expectedVariant: variantEnabled, expectedBudget: 16384},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			req := &anthropic.MessageNewParams{MaxTokens: tc.initialMaxTokens}
-			applyThinking(req, tc.effort, tc.initialMaxTokens)
+			req := &anthropic.MessageNewParams{MaxTokens: tc.maxTokens}
+			applyThinking(req, tc.effort, tc.maxTokens)
+
 			require.Equal(t, tc.expectedMaxTokens, req.MaxTokens)
-			if tc.expectThinking {
-				require.NotNil(t, req.Thinking)
+			require.Nil(t, req.Thinking.OfAdaptive)
+
+			switch tc.expectedVariant {
+			case variantNone:
+				require.Nil(t, req.Thinking.OfEnabled)
+				require.Nil(t, req.Thinking.OfDisabled)
+			case variantDisabled:
+				require.Nil(t, req.Thinking.OfEnabled)
+				require.NotNil(t, req.Thinking.OfDisabled)
+			case variantEnabled:
+				require.Nil(t, req.Thinking.OfDisabled)
+				require.NotNil(t, req.Thinking.OfEnabled)
+				require.Equal(t, tc.expectedBudget, req.Thinking.OfEnabled.BudgetTokens)
+			default:
+				t.Fatalf("unknown variant %q", tc.expectedVariant)
 			}
 		})
 	}
